@@ -2,7 +2,7 @@
 
 A nostr micro-app which allows the user to sign and publish events in bulk via CSV.
 
-Use it at [csv.coracle.social](https://csv.coracle.social).
+Use it at [csv-importer.coracle.social](https://csv-importer.coracle.social).
 
 ## Preparing your file
 
