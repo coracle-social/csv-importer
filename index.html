@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="sm:bg-purple-800 flex items-center justify-center h-screen w-screen">
+    <div class="sm:border border-solid border-purple-800 bg-white rounded-lg p-8 w-full h-full sm:h-auto sm:w-3/4 max-w-[480px] flex flex-col gap-4">
+      <div class="text-center">
+        <h1 class="text-xl">A Nostr Uploader</h1>
+        <p class="text-sm">Publish events in bulk via CSV</p>
+      </div>
+      <form id="form" class="flex flex-col gap-2">
+        <div class="flex flex-col gap-1">
+          <label for="relays">Publish to relays:</label>
+          <input id="relays" class="px-3 py-2 rounded-lg border border-solid border-purple-600 bg-purple-100" value="wss://nos.lol/,wss://relay.nostr.band/" />
+        </div>
+        <div class="flex flex-col gap-1">
+          <label>Upload a file:</label>
+          <div id="dropzone" class="border border-dashed border-purple-800 rounded-lg bg-purple-100 cursor-pointer">
+            <input id="input" type="file" accept="text/csv" class="hidden" />
+            <label id="label" for="input" aria-label="Drag and drop files here" class="block p-6 cursor-pointer">
+              Drag and drop files here
+            </label>
+          </div>
+          <a class="text-xs underline text-purple-700" href="/sample.csv" target="_blank">
+            Download sample
+          </a>
+        </div>
+        <button type="submit" class="px-3 py-2 bg-purple-800 text-white rounded-lg hover:bg-purple-700 transition-all">
+          Publish events
+        </button>
+      </form>
+      <div id="progress" class="hidden text-center"></div>
+    </div>
+    <script src="https://unpkg.com/papaparse/papaparse.min.js"></script>
+    <script src='https://unpkg.com/nostr-login@latest/dist/unpkg.js' data-no-banner="true"></script>
+    <script src="https://unpkg.com/nostr-tools/lib/nostr.bundle.js"></script>
+    <script>
+      let file, loggedIn, authRequested
+
+      const relayMap = new Map()
+
+      const now = () => Math.floor(Date.now() / 1000)
+
+      const raf = () => new Promise(r => requestAnimationFrame(r))
+
+      const sleep = t => new Promise(r => setTimeout(r, t))
+
+      const getRelay = async url => {
+        if (!relayMap.has(url)) {
+          relayMap.set(url, await NostrTools.Relay.connect(url))
+        }
+
+        return relayMap.get(url)
+      }
+
+      const showError = message => {
+        form.classList.remove('hidden')
+        progress.classList.add('hidden')
+
+        alert(message)
+      }
+
+      const showProgress = message => {
+        form.classList.add('hidden')
+        progress.classList.remove('hidden')
+        progress.innerText = message
+      }
+
+      const ensureLoggedIn = async () => {
+        if (!loggedIn && !authRequested) {
+          authRequested = true
+          document.dispatchEvent(new CustomEvent('nlLaunch', {detail: 'welcome'}))
+        }
+
+        while (!loggedIn) {
+          await sleep(100)
+        }
+      }
+
+      const onCsv = async text => {
+        await ensureLoggedIn()
+
+        const {data: [header, ...rows], errors} = Papa.parse(text.trim())
+
+        if (errors.length > 0) {
+          return showError(errors[0].message)
+        }
+
+        const kind_index = header.findIndex(h => h === 'kind')
+        const content_index = header.findIndex(h => h === 'content')
+        const created_at_index = header.findIndex(h => h === 'created_at')
+        const tags_index = header.findIndex(h => h === 'tags')
+
+        if (kind_index !== 0) return showError('"kind" heading is required in column 0')
+        if (content_index !== 1) return showError('"content" heading is required in column 1')
+        if (created_at_index !== 2) return showError('"created_at" heading is required in column 2')
+        if (tags_index !== 3) return showError('"tags" heading is required in column 3')
+
+        showProgress("Reading your csv file...")
+
+        await sleep(1500)
+
+        const templates = []
+
+        for (let i = 0; i < rows.length; i++) {
+          const [kindString, content, createdAt, ...tagStrings] = rows[i]
+          const created_at = createdAt ? parseInt(createdAt) : now()
+          const tags = tagStrings.map(t => t.split(','))
+          const kind = parseInt(kindString)
+
+          if (isNaN(kind)) {
+            return showError(`Error in row ${i + 1}: kind must be an integer`)
+          }
+
+          if (isNaN(created_at)) {
+            return showError(`Error in row ${i + 1}: created_at must be an integer or blank`)
+          }
+
+          templates.push({kind, content, created_at, tags})
+
+          await raf()
+        }
+
+        for (let i = 0; i < templates.length; i++) {
+          showProgress(`Publishing events (${i}/${templates.length})...`)
+
+          const event = await nostr.signEvent(templates[i])
+
+          for (const url of relays.value.split(',')) {
+            try {
+              const relay = await getRelay(url)
+
+              await relay.publish(event)
+            } catch (e) {
+              return showError(`Failed to publish event in row ${i + 1} to ${url}: ${e.toString()}`)
+            }
+          }
+        }
+
+        showProgress(`Done publishing ${templates.length} events!`)
+      }
+
+      const onFile = async file => {
+        if (!file || file.type !== 'text/csv') {
+          return showError("File must be a .csv")
+        }
+
+        const reader = new FileReader()
+
+        reader.addEventListener("load", () => onCsv(reader.result), false)
+        reader.readAsText(file)
+      }
+
+      document.addEventListener('nlAuth', (e) => {
+        if (e.detail.type === 'login' || e.detail.type === 'signup') {
+          loggedIn = true
+        }
+      })
+
+      input.addEventListener('change', e => {
+        e.preventDefault()
+        e.stopPropagation()
+
+        dragCounter = 0
+        dropzone.classList.remove("!border-blue-600")
+        dropzone.classList.remove("!bg-blue-100")
+        file = input.files[0]
+        label.innerText = file.name
+      })
+
+      let dragCounter = 0
+
+      document.body.addEventListener('dragenter', e => {
+        if (dragCounter++ === 0) {
+          dropzone.classList.add("!border-blue-600")
+          dropzone.classList.add("!bg-blue-100")
+        }
+      })
+
+      document.body.addEventListener('dragover', e => {
+        e.preventDefault()
+      })
+
+      document.body.addEventListener('dragleave', e => {
+        if (--dragCounter === 0) {
+          dropzone.classList.remove("!border-blue-600")
+          dropzone.classList.remove("!bg-blue-100")
+        }
+      })
+
+      document.body.addEventListener('drop', e => {
+        e.preventDefault()
+
+        dragCounter = 0
+        dropzone.classList.remove("!border-blue-600")
+        dropzone.classList.remove("!bg-blue-100")
+        file = e.dataTransfer.items[0]?.getAsFile()
+        label.innerText = file.name
+      })
+
+      form.addEventListener('submit', e => {
+        e.preventDefault()
+
+        if (!file) {
+          return showError("Please select a file")
+        }
+
+        onFile(file)
+      })
+    </script>
+  </body>
+</html>
